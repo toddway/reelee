@@ -1,0 +1,374 @@
+<head>
+    <title>reelee</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="//code.jquery.com/jquery-latest.js"></script>
+    <script src="//ajax.googleapis.com/ajax/libs/jqueryui/1.8.23/jquery-ui.min.js"></script>
+    <script src="/js/jquery.ui.touch-punch.min.js"></script>
+    <style>
+        * {font-size:1.15em;font-family:arial}
+        body {margin:0}
+        .controlButton {width:180px;height:100px;margin:0;font-weight:bold;font-size:1.5em;background:#ddd;text-align: center;border-right:1px solid #999}
+        #player {margin:0}
+        .playlistImg {float:left;margin:0 20px 0 0}
+        .playlistText {font-size:1em;font-weight:bold;padding:20px}
+        .playlistItem {height:180px;overflow:hidden;border-bottom:1px solid #999;position:relative}
+        .playlistItemRemove {position:absolute;bottom:0;right:0;padding:0px 10px;display:inline-block;line-height:1em;}
+        .playlistItemDetails {color:#777;font-size:.8em;font-weight:normal}
+        .playlistItem .status {position:absolute;bottom: 60px;left: 110px;width: 70px;text-align:center;background:#ddd;padding:20px;border:1px solid #999}
+        #msg {position:fixed;top:10px;right:10px;padding:20px;display:none;background:#ddd;border:1px solid #999;z-index:9999}
+        #playerControls {width:100%;border:1px solid #999;margin-top:-8px}
+        #listControls {width:100%;border:1px solid #999;}
+        .active {background:#ddd}
+    </style>
+</head>
+<body>
+    <div id="msg"></div>
+    <iframe id="player" width="100%" height="500" src="http://www.youtube.com/embed/a?fs=1&showinfo=0&autohide=1&modestbranding=1&enablejsapi=1" frameborder="0" webkitallowfullscreen mozallowfullscreen allowfullscreen></iframe>​
+    <table id="playerControls" cellspacing="0"><tr></tr></table>
+    <div id="playlist"></div>    
+    <table id="listControls" cellspacing="0"><tr></tr></table>
+
+    <script>
+        var socket = io.connect(document.location.origin);
+        var queue = false;
+        var videoId = false;
+        var syncTime = false;
+        var serverEvent = false; //TODO better way to do this?
+        
+
+        socket.on('connect', function(){
+            socket.emit('init');
+        });
+
+        socket.on('playerStateChange', function (data, time) {            
+            if (!loading) {                      
+                if (data == YT.PlayerState.PLAYING) {
+                    serverEvent = true;
+                    player.playVideo();
+                }
+                if (data == YT.PlayerState.PAUSED) {
+                    serverEvent = true;
+                    player.pauseVideo();    
+                    syncTime = time;
+                }
+            }
+        });      
+        
+        socket.on('setVideo', setVideo); 
+        
+        socket.on('volume', function(arg) {            
+            var step = 10;
+            var vol = arg == 'up' ? player.getVolume() + step : player.getVolume() - step;
+            if (vol <= 100 && vol >= 0) {
+                $("#msg").text('volume ' + vol).fadeIn(1).delay(200).fadeOut(500);
+                player.setVolume(vol);
+            }
+        });
+        
+        socket.on('updatePlaylist', function(playlist) {
+            $('#playlist').empty();
+            $(playlist).each(addPlaylistItem);                        
+        });
+        
+        socket.on('init', function(playlist, id) {
+            $(playlist).each(addPlaylistItem);
+            videoId = id            
+        });
+        
+        socket.on('emptyPlaylist', function(playlist) {
+            $('#playlist').empty(); 
+        });
+
+        // 2. This code loads the IFrame Player API code asynchronously.
+        var tag = document.createElement('script');
+        tag.src = "//www.youtube.com/iframe_api";
+        var firstScriptTag = document.getElementsByTagName('script')[0];
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+        // 3. This function creates an <iframe> (and YouTube player) after the API code downloads.
+        var player;
+        function onYouTubeIframeAPIReady() {
+            player = new YT.Player('player', {
+                events: {
+                    'onReady': onPlayerReady,
+                    'onStateChange': onPlayerStateChange
+                }
+            });
+        }
+
+        // 4. YT API will call this function when the video player is ready.
+        function onPlayerReady(event) {
+            setVideo(videoId);
+        }
+
+        // 5. YT API calls this function when the player's state changes.
+        var loading = false;
+        function onPlayerStateChange(event) {
+            //this is how we pre-buffer then pause once the player starts playing
+            if (loading && event.data == YT.PlayerState.PLAYING) {
+                player.pauseVideo();
+                player.seekTo(0, true);
+                if ($('#muteButton').html() != '{x') player.unMute();
+                loading = false;
+            }
+            else {
+                //this is to resync players when paused
+                if (syncTime != false && event.data == YT.PlayerState.PAUSED) {
+                    player.seekTo(syncTime);
+                    syncTime = false;
+                }
+                
+                //emit play and pause events
+                if (event.data == YT.PlayerState.PAUSED || event.data == YT.PlayerState.PLAYING) {
+                    $('#playButton').html(event.data == YT.PlayerState.PLAYING ? 'll' : '>');
+                    $('#playlist #' + videoId + ' .status').html(event.data == YT.PlayerState.PLAYING ? 'll' : '>');
+                    if (serverEvent == false) {
+                        socket.emit('playerStateChange', event.data, player.getCurrentTime());                        
+                    }
+                    else {
+                        serverEvent = false;
+                    }
+                }               
+                else if (event.data == YT.PlayerState.ENDED) {
+                    nextId = $('.playlistItem[id="' + videoId + '"]').next().attr('id');
+                    socket.emit('setVideo', nextId);
+                }
+            }
+            
+        }
+      
+        // on load of page
+        $(function(){
+            $('#urlInput').click(function() {$(this).val('')})
+            
+            $(document.createElement("td"))
+                .attr('id', 'addToPlaylistButton')
+                .attr('class', 'controlButton')
+                .html('+')
+                .click(function() { 
+                    addIdsFromUrl(prompt('Paste the URL of any YouTube video or playlist to add it to the queue', ''));
+                })
+                .appendTo("#listControls tr");
+            
+            $(document.createElement("td"))
+                .attr('id', 'emptyPlaylistButton')
+                .attr('class', 'controlButton')
+                .html('x')
+                .click(function() { 
+                    if(confirm('Are you sure you want to empty the queue?')) {
+                        socket.emit('emptyPlaylist');
+                    }
+                })
+                .appendTo("#listControls tr");
+            
+            $(document.createElement("td"))
+                .attr('class', 'controlButton')
+                .attr('id', 'playButton')
+                .html('>')
+                .click(function() { 
+                    socket.emit('playerStateChange', player.getPlayerState() == 1 ? 2 : 1, player.getCurrentTime());
+                })
+                .appendTo("#playerControls tr"); 
+            
+            $(document.createElement("td"))
+                .attr('class', 'controlButton')
+                .attr('id', 'nextButton')
+                .html('&raquo;')
+                .click(function() { 
+                    nextId = $('.playlistItem[id="' + videoId + '"]').next().attr('id');
+                    socket.emit('setVideo', nextId);
+                })
+                .appendTo("#playerControls tr"); 
+            
+            $(document.createElement("td"))
+                .attr('class', 'controlButton')
+                .attr('id', 'muteButton')
+                .html('{&lsaquo;')
+                .click(function() { 
+                    if ($(this).html() != '{x') {
+                        $(this).html('{x');
+                        player.mute();
+                        $("#msg").text('Muted').fadeIn(1).delay(200).fadeOut(500);
+                    }
+                    else {
+                        $(this).html('{&lsaquo;');
+                        player.unMute();
+                        $("#msg").text('Unmuted').fadeIn(1).delay(200).fadeOut(500);
+                    }
+                })
+                .appendTo("#playerControls tr");
+            
+            $(document.createElement("td"))
+                .attr('class', 'controlButton')
+                .html('{&uarr;')
+                .click(function() { 
+                    socket.emit('volume', 'up');
+                })
+                .appendTo("#playerControls tr");
+             
+            $(document.createElement("td"))
+                .attr('class', 'controlButton')
+                .html('{&darr;')
+                .click(function() { 
+                    socket.emit('volume', 'down');
+                })
+                .appendTo("#playerControls tr");
+        });
+        
+        function setVideo(id) {
+            loading = true;
+            videoId = id;
+            syncTime = false;
+            player.cueVideoById(id);
+            player.mute();
+            player.seekTo(1, true);
+            $('.playlistItem').each(function() {
+                $(this).removeClass('active');
+                $('.playlistText .status', this).remove();
+            });
+            $('#' + id).each(function() {
+                $(this).addClass('active');
+                $(document.createElement("div"))
+                    .attr('class', 'status')
+                    .html('...')
+                    .appendTo($('.playlistText', this));
+            });
+        }
+        
+        function addIdsFromUrl(url) {
+            var list = getQueryParam(url, 'list');
+            if (list != '') {
+                $.ajax({  
+                    type: "GET",  
+                    url: 'https://gdata.youtube.com/feeds/api/playlists/' +  list + '?v=2&alt=json',   
+                    dataType: 'json',
+                    success: function(json) {
+                       var items = [];
+                       $.each(json.feed.entry, function() {
+                           items.push({
+                               id: this.media$group.yt$videoid.$t,
+                               title: this.title.$t,
+                               duration: this.media$group.yt$duration.seconds,
+                               views: this.yt$statistics.viewCount
+                           });                           
+                       });
+                       socket.emit('addToPlaylist', items);
+                    }  
+                });
+            }
+            else {
+                var value = idFromUrl(url);
+                $.ajax({  
+                    type: "GET",  
+                    url: 'https://gdata.youtube.com/feeds/api/videos/' + value + '?v=2&alt=json',   
+                    dataType: 'json',
+                    success: function(json) {
+                        var items = [];
+                        items.push({
+                            id: json.entry.media$group.yt$videoid.$t,
+                            title: json.entry.title.$t,
+                            duration: json.entry.media$group.yt$duration.seconds,
+                            views: json.entry.yt$statistics.viewCount
+                        });                           
+
+                        socket.emit('addToPlaylist', items);
+                    }  
+                });
+            }
+        }
+        
+        function idFromUrl(url) {
+            var regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=)([^#\&\?]*).*/;
+            var match = url.match(regExp);
+            if (match&&match[2].length==11){
+                return match[2];
+            }else{
+                return url;
+            }
+        }
+        
+        function getQueryParam(url, param) {
+            var a = document.createElement('a');
+            a.href = url;
+            var query = a.search.substring(1);
+            var vars = query.split('&');
+            for (var i = 0; i < vars.length; i++) {
+                var pair = vars[i].split('=');
+                if (decodeURIComponent(pair[0]) == param) {
+                    return decodeURIComponent(pair[1]);
+                }
+            }
+            return '';
+        }
+        
+        function addPlaylistItem(key, value) {
+            var html = '<img class="playlistImg" src="http://i.ytimg.com/vi/' + value.id + '/mqdefault.jpg"/>'
+                     + '<div class="playlistText"></div>';                                
+
+            var item = $(document.createElement("div"))
+                .attr('id', value.id)
+                .attr('class', 'playlistItem')
+                .html(html)
+                .click(function(){
+                    if (value.id == videoId) {
+                        socket.emit('playerStateChange', player.getPlayerState() == 1 ? 2 : 1, player.getCurrentTime());
+                    }
+                    else {
+                        socket.emit('setVideo', value.id);
+                    }                  
+                })
+                .appendTo("#playlist");
+                
+           $(document.createElement("div"))
+                .attr('class', 'playlistTitle')
+                .text(value.title)                        
+                .appendTo($('.playlistText', item));
+
+           $(document.createElement("div"))
+                .attr('class', 'playlistItemDetails')
+                .html(value.duration.toHHMMSS() + ' &middot; ' + addCommas(value.views) + ' views')                        
+                .appendTo($('.playlistText', item));
+
+           $(document.createElement("div"))
+                .attr('class', 'playlistItemRemove')
+                .text('-')
+                .click(function(){
+                    socket.emit('removeFromPlaylist', value.id)
+                    return false;                            
+                })
+                .appendTo($('.playlistText', item));
+        }
+        
+        String.prototype.toHHMMSS = function () {
+            sec_numb    = parseInt(this);
+            var hours   = Math.floor(sec_numb / 3600);
+            var minutes = Math.floor((sec_numb - (hours * 3600)) / 60);
+            var seconds = sec_numb - (hours * 3600) - (minutes * 60);
+
+            var time = '';
+            if (hours > 0) {
+                if (hours   < 10) {time = "0"+hours;}
+                if (minutes < 10) {time = time + "0"+minutes;}
+            }
+            if (seconds < 10) {seconds = "0"+seconds;}
+            var time = time + minutes+':'+seconds;
+            return time;
+        }
+        
+        function addCommas(nStr) {
+            nStr += '';
+            var x = nStr.split('.');
+            var x1 = x[0];
+            var x2 = x.length > 1 ? '.' + x[1] : '';
+            var rgx = /(\d+)(\d{3})/;
+            while (rgx.test(x1)) {
+                x1 = x1.replace(rgx, '$1' + ',' + '$2');
+            }
+            return x1 + x2;
+        }
+        //http://www.youtube.com/playlist?list=PL9NjHrkf_5NuOlngXOwmBRMjLr4TlJ_DQ
+        //http://www.youtube.com/watch?v=uz6UrYvacQk&list=ALGLx1orRGw4UrJGtHYnZ4pAYs-wgUs52S
+        //https://gdata.youtube.com/feeds/api/playlists/PL9NjHrkf_5NuOlngXOwmBRMjLr4TlJ_DQ?v=2&alt=json
+        //https://gdata.youtube.com/feeds/api/videos/uz6UrYvacQk?v=2&alt=json
+    </script>
+</body>
